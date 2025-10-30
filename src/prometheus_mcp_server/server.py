@@ -404,7 +404,7 @@ async def list_graphite_metrics(filter: Optional[str] = None, limit: int = 200, 
             await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} metrics")
 
         logger.info("Graphite metrics listed", filter=filter, page_start=start, page_size=len(page), next_token_present=bool(next_token))
-        return {"source": "graphite", "metrics": page, "nextPageToken": next_token}
+        return {"source": "graphite", "metrics": page, "nextPageToken": next_token, "totalMetricFound": len(all_metrics)}
 
     except Exception as e:
         logger.error("Failed to list Graphite metrics", error=str(e))
@@ -516,7 +516,7 @@ async def list_prometheus_metrics(filter: Optional[str] = None, limit: int = 200
         await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} metrics")
 
     logger.info("Prometheus metrics listed", page_start=start, page_size=len(page), next_token_present=bool(next_token))
-    return {"source": "prometheus", "metrics": page, "nextPageToken": next_token}
+    return {"source": "prometheus", "metrics": page, "nextPageToken": next_token, "totalMetricFound": len(all_metrics)}
 
 @mcp.tool(
     description="Query Graphite time-series data (via Grafana proxy) for one or more targets",
@@ -670,6 +670,7 @@ async def find_graphite_keys(pattern: str, limit: int = 200, pageToken: Optional
             "directories": page_directories,
             "metrics": page_metrics,
             "nextPageToken": next_token,
+            "totalMetricFound": len(merged),
         }
     except Exception as e:
         logger.error("Graphite find_keys failed", error=str(e))

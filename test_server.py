@@ -34,11 +34,11 @@ async def main():
         # print(result)
         # print("--------\n")
 
-        # result = await client.call_tool("list_graphite_metrics", {
-        #     "limit": 10,
-        # })
-        # print(result)
-        # print("--------\n")
+        result = await client.call_tool("list_graphite_metrics", {
+            "limit": 10,
+        })
+        print(result)
+        print("--------\n")
 
         # result = await client.call_tool("list_graphite_metrics", {
         #     "pageToken": "10",
@@ -66,16 +66,16 @@ async def main():
         print(result)
         print("--------\n")
 
-        # Next page using nextPageToken
-        if result and hasattr(result, "data") and isinstance(result.data, dict) and result.data.get("nextPageToken"):
-            next_token = result.data["nextPageToken"]
-            result2 = await client.call_tool("find_graphite_keys", {
-                "pattern": "qstats.count.model_service.kubernetes.predict.send.by_model_id.*",
-                "limit": 5,
-                "pageToken": next_token
-            })
-            print(result2)
-            print("--------\n")
+        # # Next page using nextPageToken
+        # if result and hasattr(result, "data") and isinstance(result.data, dict) and result.data.get("nextPageToken"):
+        #     next_token = result.data["nextPageToken"]
+        #     result2 = await client.call_tool("find_graphite_keys", {
+        #         "pattern": "qstats.count.model_service.kubernetes.predict.send.by_model_id.*",
+        #         "limit": 5,
+        #         "pageToken": next_token
+        #     })
+        #     print(result2)
+        #     print("--------\n")
 
 
 asyncio.run(main())
