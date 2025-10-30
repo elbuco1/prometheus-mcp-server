@@ -8,20 +8,6 @@ from prometheus_mcp_server.logging_config import setup_logging
 logger = setup_logging()
 
 def setup_environment():
-    if dotenv.load_dotenv():
-        logger.info("Environment configuration loaded", source=".env file")
-    else:
-        logger.info("Environment configuration loaded", source="environment variables", note="No .env file found")
-
-    if not config.url:
-        logger.error(
-            "Missing required configuration",
-            error="PROMETHEUS_URL environment variable is not set",
-            suggestion="Please set it to your Prometheus server URL",
-            example="http://your-prometheus-server:9090"
-        )
-        return False
-    
     # MCP Server configuration validation
     mcp_config = config.mcp_server_config
     if mcp_config:
@@ -46,18 +32,14 @@ def setup_environment():
             )
             return False
     
-    # Determine authentication method
-    auth_method = "none"
-    if config.username and config.password:
-        auth_method = "basic_auth"
-    elif config.token:
-        auth_method = "bearer_token"
-    
     logger.info(
-        "Prometheus configuration validated",
-        server_url=config.url,
-        authentication=auth_method,
-        org_id=config.org_id if config.org_id else None
+        "Server configuration validated",
+        prometheus_url=config.prometheus_url,
+        graphite_url=config.graphite_url,
+        grafana_dashboard_url=config.grafana_dashboard_url,
+        mcp_server_transport=config.mcp_server_config.mcp_server_transport,
+        mcp_bind_host=config.mcp_server_config.mcp_bind_host,
+        mcp_bind_port=config.mcp_server_config.mcp_bind_port,
     )
     
     return True

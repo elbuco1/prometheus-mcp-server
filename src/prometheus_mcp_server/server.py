@@ -13,74 +13,13 @@ import requests
 from fastmcp import FastMCP
 from prometheus_mcp_server.logging_config import get_logger
 
-dotenv.load_dotenv()
-mcp = FastMCP("Prometheus MCP")
+GRAFANA_BASE_URL = "https://grafana.quora.net/api"
+GRAFANA_DATA_SOURCE_URL = GRAFANA_BASE_URL + "/datasources/proxy/{data_source_id}"
+GRAFANA_DASHBOARD_URL = f"{GRAFANA_BASE_URL}/dashboards/db"
 
-# Cache for metrics list to improve completion performance
-_metrics_cache = {"data": None, "timestamp": 0}
-_CACHE_TTL = 300  # 5 minutes
-
-# Get logger instance
-logger = get_logger()
-
-# Health check tool for Docker containers and monitoring
-@mcp.tool(
-    description="Health check endpoint for container monitoring and status verification",
-    annotations={
-        "title": "Health Check",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": True
-    }
-)
-async def health_check() -> Dict[str, Any]:
-    """Return health status of the MCP server and Prometheus connection.
-    
-    Returns:
-        Health status including service information, configuration, and connectivity
-    """
-    try:
-        health_status = {
-            "status": "healthy",
-            "service": "prometheus-mcp-server",
-            "version": "1.4.1",
-            "timestamp": datetime.utcnow().isoformat(),
-            "transport": config.mcp_server_config.mcp_server_transport if config.mcp_server_config else "stdio",
-            "configuration": {
-                "prometheus_url_configured": bool(config.url),
-                "authentication_configured": bool(config.username or config.token),
-                "org_id_configured": bool(config.org_id)
-            }
-        }
-        
-        # Test Prometheus connectivity if configured
-        if config.url:
-            try:
-                # Quick connectivity test
-                make_prometheus_request("query", params={"query": "up", "time": str(int(time.time()))})
-                health_status["prometheus_connectivity"] = "healthy"
-                health_status["prometheus_url"] = config.url
-            except Exception as e:
-                health_status["prometheus_connectivity"] = "unhealthy"
-                health_status["prometheus_error"] = str(e)
-                health_status["status"] = "degraded"
-        else:
-            health_status["status"] = "unhealthy"
-            health_status["error"] = "PROMETHEUS_URL not configured"
-        
-        logger.info("Health check completed", status=health_status["status"])
-        return health_status
-        
-    except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        return {
-            "status": "unhealthy",
-            "service": "prometheus-mcp-server",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
+class DataSources(Enum):
+    PROMETHEUS = 14
+    GRAPHITE = 17
 
 class TransportType(str, Enum):
     """Supported MCP server transport types."""
@@ -111,66 +50,111 @@ class MCPServerConfig:
             raise ValueError(f"MCP BIND PORT is required")
 
 @dataclass
-class PrometheusConfig:
-    url: str
-    url_ssl_verify: bool = True
-    # Optional credentials
-    username: Optional[str] = None
-    password: Optional[str] = None
-    token: Optional[str] = None
-    # Optional Org ID for multi-tenant setups
-    org_id: Optional[str] = None
-    # Optional Custom MCP Server Configuration
+class ServerConfig:
+    url_ssl_verify: bool
+    prometheus_url: str
+    graphite_url: str
+    grafana_dashboard_url: str
     mcp_server_config: Optional[MCPServerConfig] = None
 
-config = PrometheusConfig(
-    url=os.environ.get("PROMETHEUS_URL", ""),
-    url_ssl_verify=os.environ.get("PROMETHEUS_URL_SSL_VERIFY", "True").lower() in ("true", "1", "yes"),
-    username=os.environ.get("PROMETHEUS_USERNAME", ""),
-    password=os.environ.get("PROMETHEUS_PASSWORD", ""),
-    token=os.environ.get("PROMETHEUS_TOKEN", ""),
-    org_id=os.environ.get("ORG_ID", ""),
+config = ServerConfig(
+    url_ssl_verify=os.environ.get("PROMETHEUS_URL_SSL_VERIFY", True),
+    prometheus_url=GRAFANA_DATA_SOURCE_URL.format(data_source_id=DataSources.PROMETHEUS.value),
+    graphite_url=GRAFANA_DATA_SOURCE_URL.format(data_source_id=DataSources.GRAPHITE.value),
+    grafana_dashboard_url=GRAFANA_DASHBOARD_URL,
     mcp_server_config=MCPServerConfig(
-        mcp_server_transport=os.environ.get("PROMETHEUS_MCP_SERVER_TRANSPORT", "stdio").lower(),
-        mcp_bind_host=os.environ.get("PROMETHEUS_MCP_BIND_HOST", "127.0.0.1"),
-        mcp_bind_port=int(os.environ.get("PROMETHEUS_MCP_BIND_PORT", "8080"))
+        mcp_server_transport=os.environ.get("METRICS_MCP_SERVER_TRANSPORT", "stdio").lower(),
+        mcp_bind_host=os.environ.get("METRICS_MCP_BIND_HOST", "127.0.0.1"),
+        mcp_bind_port=int(os.environ.get("METRICS_MCP_BIND_PORT", "8080"))
     )
 )
 
-def get_prometheus_auth():
-    """Get authentication for Prometheus based on provided credentials."""
-    if config.token:
-        return {"Authorization": f"Bearer {config.token}"}
-    elif config.username and config.password:
-        return requests.auth.HTTPBasicAuth(config.username, config.password)
-    return None
+mcp = FastMCP("Metrics MCP")
+
+# Cache for metrics list to improve completion performance
+_metrics_cache = {"data": None, "timestamp": 0}
+_CACHE_TTL = 300  # 5 minutes
+
+# Get logger instance
+logger = get_logger()
+
+# Health check tool for Docker containers and monitoring
+@mcp.tool(
+    description="Health check endpoint for container monitoring and status verification",
+    annotations={
+        "title": "Health Check",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def health_check() -> Dict[str, Any]:
+    """Return health status of the MCP server and Prometheus and Graphite connections through Grafana.
+    
+    Returns:
+        Health status including service information, configuration, and connectivity
+    """
+    try:
+        health_status = {
+            "status": "healthy",
+            "service": "metrics-mcp-server",
+            "timestamp": datetime.utcnow().isoformat(),
+            "transport": config.mcp_server_config.mcp_server_transport if config.mcp_server_config else "stdio",
+            "prometheus": {
+                "status": "unknown",
+                "error": None,
+            },
+            "graphite": {
+                "status": "unknown",
+                "error": None,
+            },
+            "grafana": {
+                "status": "unknown",
+                "error": None,
+            },
+        }
+        
+        # Test Prometheus connectivity
+        try:
+            # Quick connectivity test
+            make_prometheus_request("query", params={"query": "up", "time": str(int(time.time()))})
+            health_status["prometheus"]["status"] = "healthy"
+        except Exception as e:
+            health_status["prometheus"]["status"] = "unhealthy"
+            health_status["prometheus"]["error"] = str(e)
+            health_status["status"] = "degraded"
+
+        # TODO: Test Graphite connectivity
+        # TODO: Test Grafana dashboard connectivity
+        
+        logger.info("Health check completed", status=health_status["status"])
+        return health_status
+        
+    except Exception as e:
+        logger.error("Health check failed", error=str(e))
+        return {
+            "status": "unhealthy",
+            "service": "prometheus-mcp-server",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
 
 def make_prometheus_request(endpoint, params=None):
     """Make a request to the Prometheus API with proper authentication and headers."""
-    if not config.url:
-        logger.error("Prometheus configuration missing", error="PROMETHEUS_URL not set")
-        raise ValueError("Prometheus configuration is missing. Please set PROMETHEUS_URL environment variable.")
+
     if not config.url_ssl_verify:
         logger.warning("SSL certificate verification is disabled. This is insecure and should not be used in production environments.", endpoint=endpoint)
 
-    url = f"{config.url.rstrip('/')}/api/v1/{endpoint}"
-    url_ssl_verify = config.url_ssl_verify
-    auth = get_prometheus_auth()
+    url = f"{config.prometheus_url.rstrip('/')}/api/v1/{endpoint}"
     headers = {}
-
-    if isinstance(auth, dict):  # Token auth is passed via headers
-        headers.update(auth)
-        auth = None  # Clear auth for requests.get if it's already in headers
-    
-    # Add OrgID header if specified
-    if config.org_id:
-        headers["X-Scope-OrgID"] = config.org_id
 
     try:
         logger.debug("Making Prometheus API request", endpoint=endpoint, url=url, params=params)
         
-        # Make the request with appropriate headers and auth
-        response = requests.get(url, params=params, auth=auth, headers=headers, verify=url_ssl_verify)
+        # Make the request with appropriate headers
+        response = requests.get(url, params=params, headers=headers, verify=config.url_ssl_verify)
         
         response.raise_for_status()
         result = response.json()
@@ -180,12 +164,7 @@ def make_prometheus_request(endpoint, params=None):
             logger.error("Prometheus API returned error", endpoint=endpoint, error=error_msg, status=result["status"])
             raise ValueError(f"Prometheus API error: {error_msg}")
         
-        data_field = result.get("data", {})
-        if isinstance(data_field, dict):
-            result_type = data_field.get("resultType")
-        else:
-            result_type = "list"
-        logger.debug("Prometheus API request successful", endpoint=endpoint, result_type=result_type)
+        logger.debug("Prometheus API request successful", endpoint=endpoint)
         return result["data"]
     
     except requests.exceptions.RequestException as e:
@@ -254,21 +233,9 @@ async def execute_query(query: str, time: Optional[str] = None) -> Dict[str, Any
     logger.info("Executing instant query", query=query, time=time)
     data = make_prometheus_request("query", params=params)
 
-    # Build Prometheus UI link
-    from urllib.parse import urlencode
-    ui_params = {"g0.expr": query, "g0.tab": "0"}
-    if time:
-        ui_params["g0.moment_input"] = time
-    prometheus_ui_link = f"{config.url.rstrip('/')}/graph?{urlencode(ui_params)}"
-
     result = {
         "resultType": data["resultType"],
         "result": data["result"],
-        "links": [{
-            "href": prometheus_ui_link,
-            "rel": "prometheus-ui",
-            "title": "View in Prometheus UI"
-        }]
     }
 
     logger.info("Instant query completed",
@@ -319,24 +286,9 @@ async def execute_range_query(query: str, start: str, end: str, step: str, ctx=N
     if ctx:
         await ctx.report_progress(progress=50, total=100, message="Processing query results...")
 
-    # Build Prometheus UI link
-    from urllib.parse import urlencode
-    ui_params = {
-        "g0.expr": query,
-        "g0.tab": "0",
-        "g0.range_input": f"{start} to {end}",
-        "g0.step_input": step
-    }
-    prometheus_ui_link = f"{config.url.rstrip('/')}/graph?{urlencode(ui_params)}"
-
     result = {
         "resultType": data["resultType"],
         "result": data["result"],
-        "links": [{
-            "href": prometheus_ui_link,
-            "rel": "prometheus-ui",
-            "title": "View in Prometheus UI"
-        }]
     }
 
     # Report completion
