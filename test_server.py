@@ -23,16 +23,16 @@ async def main():
         print(result)
         print("--------\n")
 
-        # result = await client.call_tool("list_metrics", {})
-        # print(result)
-        # print("--------\n")
-
-        result = await client.call_tool("list_graphite_metrics", {
-            "pageToken": "250",
-            "limit": 5,
-        })
+        result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
         print(result)
         print("--------\n")
+
+        result = await client.call_tool("list_graphite_metrics", {
+            # "pageToken": "250",
+            "limit": 10,
+        })
+        print(result)
+        # print("--------\n")
 
 
 asyncio.run(main())
