@@ -498,7 +498,149 @@ async def list_prometheus_metrics(filter: Optional[str] = None, limit: int = 200
     return {"source": "prometheus", "metrics": page, "nextPageToken": next_token}
 
 @mcp.tool(
-    description="Get metadata for a specific metric",
+    description="Query Graphite time-series data (via Grafana proxy) for one or more targets",
+    annotations={
+        "title": "Query Graphite",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def query_graphite(
+    targets: List[str],
+    from_: str = "-5min",
+    until: Optional[str] = None,
+    maxDataPoints: Optional[int] = None,
+    ctx=None,
+) -> Dict[str, Any]:
+    """Execute a Graphite render query and return series data.
+
+    Behavior:
+        - Sends a request to `{graphite_url}/render` through Grafana's datasource proxy with `format=json`.
+        - Supports multiple targets; each is passed as a separate `target` parameter.
+        - Time range is controlled with `from_` and optional `until` (Graphite relative or absolute times).
+        - Optional `maxDataPoints` controls server-side downsampling for UI/transport efficiency.
+
+    Args:
+        targets: One or more Graphite target expressions (e.g., "stats.counters.requests.count").
+        from_: Start time (e.g., "-15min", "-1h", or absolute like "2025-10-30 15:00:00").
+        until: Optional end time (e.g., "now", "-0min", or absolute timestamp).
+        maxDataPoints: Optional integer to request downsampled data from Graphite.
+
+    Returns:
+        Dict with shape:
+            {
+                "source": "graphite",
+                "series": [
+                    {
+                        "target": str,
+                        "datapoints": [[value: float|null, timestamp: int], ...]
+                    }, ...
+                ]
+            }
+    """
+    if not targets or not isinstance(targets, list):
+        return {"source": "graphite", "series": [], "error": "targets must be a non-empty list"}
+
+    try:
+        if ctx:
+            await ctx.report_progress(progress=0, total=100, message="Preparing Graphite query...")
+
+        graphite_base = config.graphite_url.rstrip("/")
+        url = f"{graphite_base}/render"
+        params: Dict[str, Any] = {
+            "format": "json",
+            "from": from_,
+        }
+        if until is not None:
+            params["until"] = until
+        if maxDataPoints is not None:
+            params["maxDataPoints"] = maxDataPoints
+        # requests supports list values to create repeated query params
+        params["target"] = targets
+
+        logger.info("Executing Graphite render", url=url, target_count=len(targets))
+        resp = requests.get(url, params=params, timeout=60, verify=config.url_ssl_verify)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ValueError(f"Unexpected Graphite render response: {type(data).__name__}")
+
+        if ctx:
+            await ctx.report_progress(progress=100, total=100, message=f"Received {len(data)} series")
+
+        return {"source": "graphite", "series": data}
+    except Exception as e:
+        logger.error("Graphite query failed", error=str(e))
+        return {"source": "graphite", "series": [], "error": str(e)}
+
+@mcp.tool(
+    description="Find Graphite keys using hierarchical glob patterns (via Grafana proxy)",
+    annotations={
+        "title": "Find Graphite Keys",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def find_graphite_keys(pattern: str, ctx=None) -> Dict[str, Any]:
+    """Find Graphite directories and leaf metrics for a glob `pattern`.
+
+    Behavior:
+        - Calls `{graphite_url}/metrics/find?format=json&query={pattern}` through Grafana's datasource proxy.
+        - Graphite glob semantics apply (e.g., `foo.*.bar`, `{a,b}`, etc.).
+        - Returns two alphabetically sorted lists: directories (with trailing `.*`) and metrics (leaf paths).
+
+    Args:
+        pattern: Graphite/Carbon-style glob pattern (single-segment wildcards).
+
+    Returns:
+        {
+            "source": "graphite",
+            "pattern": str,
+            "directories": [str, ...],
+            "metrics": [str, ...]
+        }
+    """
+    try:
+        if ctx:
+            await ctx.report_progress(progress=0, total=100, message="Searching Graphite keys...")
+
+        base = config.graphite_url.rstrip('/')
+        url = f"{base}/metrics/expand/"
+        params = {"query": pattern}
+        logger.info("Finding Graphite keys (VM expand)", url=url, pattern=pattern)
+        resp = requests.get(url, params=params, timeout=30, verify=config.url_ssl_verify)
+        resp.raise_for_status()
+        data = resp.json()
+
+        directories: List[str] = []
+        metrics: List[str] = []
+        # VM expand: List[str] where entries ending with '.' are directories
+        if isinstance(data, list) and all(isinstance(x, str) for x in data):
+            for path in data:  # type: ignore[assignment]
+                if path.endswith("."):
+                    directories.append(path + "*")
+                else:
+                    metrics.append(path)
+        else:
+            raise ValueError(f"Unexpected response type: {type(data).__name__}")
+
+        directories = sorted(directories)
+        metrics = sorted(metrics)
+
+        if ctx:
+            await ctx.report_progress(progress=100, total=100, message=f"Found {len(metrics)} metrics and {len(directories)} dirs")
+
+        return {"source": "graphite", "pattern": pattern, "directories": directories, "metrics": metrics}
+    except Exception as e:
+        logger.error("Graphite find_keys failed", error=str(e))
+        return {"source": "graphite", "pattern": pattern, "directories": [], "metrics": [], "error": str(e)}
+
+@mcp.tool(
+    description="Get metadata for a specific Prometheus metric",
     annotations={
         "title": "Get Metric Metadata",
         "readOnlyHint": True,

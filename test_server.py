@@ -23,26 +23,44 @@ async def main():
         print(result)
         print("--------\n")
 
-        result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
-        print(result)
-        print("--------\n")
+        # result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
+        # print(result)
+        # print("--------\n")
 
-        result = await client.call_tool("list_prometheus_metrics", {
-            "limit": 10,
-            "pageToken": "10",
-        })
-        print(result)
-        print("--------\n")
+        # result = await client.call_tool("list_prometheus_metrics", {
+        #     "limit": 10,
+        #     "pageToken": "10",
+        # })
+        # print(result)
+        # print("--------\n")
 
-        result = await client.call_tool("list_graphite_metrics", {
-            "limit": 10,
-        })
-        print(result)
-        print("--------\n")
+        # result = await client.call_tool("list_graphite_metrics", {
+        #     "limit": 10,
+        # })
+        # print(result)
+        # print("--------\n")
 
-        result = await client.call_tool("list_graphite_metrics", {
-            "pageToken": "10",
-            "limit": 10,
+        # result = await client.call_tool("list_graphite_metrics", {
+        #     "pageToken": "10",
+        #     "limit": 10,
+        # })
+        # print(result)
+        # print("--------\n")
+
+        # Example Graphite query with aggregation and alias
+        # result = await client.call_tool("query_graphite", {
+        #     "targets": [
+        #         "alias(summarize(transformNull(qstats.count.model_service.kubernetes.predict.send.by_model_id.3000214.all.count, 0), '1m', 'avg'), \"3000214\")"
+        #     ],
+        #     "from_": "-15min",
+        #     "maxDataPoints": 600,
+        # })
+        # print(result)
+        # print("--------\n")
+
+        # Example Graphite key search (glob pattern)
+        result = await client.call_tool("find_graphite_keys", {
+            "pattern": "qstats.count.model_service.kubernetes.predict.send.by_model_id.*"
         })
         print(result)
         print("--------\n")
