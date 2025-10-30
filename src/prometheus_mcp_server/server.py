@@ -110,6 +110,23 @@ def _get_cached_list(cache_store: Dict[str, Any], fetch_fn, cache_name: str) -> 
         logger.error("Failed to refresh cached list", cache=cache_name, error=str(e))
         return cache_store["data"] if cache_store["data"] is not None else []
 
+def _filter_and_paginate(items: List[str], filter_value: Optional[str], limit: int, page_token: Optional[str]) -> Dict[str, Any]:
+    """Apply substring filter and offset-based pagination to a list of strings.
+
+    Returns a dict with keys: page (List[str]), next_token (str|None), start (int).
+    """
+    limit = max(1, min(limit, METRICS_PAGE_MAX))
+    if filter_value:
+        items = [m for m in items if filter_value in m]
+    try:
+        start = int(page_token) if page_token is not None else 0
+    except ValueError:
+        start = 0
+    end = start + limit
+    page = items[start:end]
+    next_token = str(end) if end < len(items) else None
+    return {"page": page, "next_token": next_token, "start": start}
+
 # Get logger instance
 logger = get_logger()
 
@@ -351,29 +368,16 @@ async def list_graphite_metrics(filter: Optional[str] = None, limit: int = 200, 
         - Use `filter` to narrow results and reduce token/latency costs.
         - Page sizes above METRICS_PAGE_MAX are automatically reduced to METRICS_PAGE_MAX.
     """
-    # Normalize arguments
-    limit = max(1, min(limit, METRICS_PAGE_MAX))
-
     try:
         if ctx:
             await ctx.report_progress(progress=0, total=100, message="Loading Graphite metrics index...")
 
         all_metrics = get_cached_graphite_metrics()
 
-        if filter:
-            metrics = [m for m in all_metrics if filter in m]
-        else:
-            metrics = all_metrics
-
-        # Pagination by offset encoded as pageToken
-        try:
-            start = int(pageToken) if pageToken is not None else 0
-        except ValueError:
-            start = 0
-        end = start + limit
-
-        page = metrics[start:end]
-        next_token = str(end) if end < len(metrics) else None
+        page_info = _filter_and_paginate(all_metrics, filter, limit, pageToken)
+        page = page_info["page"]
+        next_token = page_info["next_token"]
+        start = page_info["start"]
 
         if ctx:
             await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} metrics")
@@ -480,25 +484,12 @@ async def list_prometheus_metrics(filter: Optional[str] = None, limit: int = 200
     if ctx:
         await ctx.report_progress(progress=0, total=100, message="Fetching Prometheus metrics list...")
 
-    # Clamp limit
-    limit = max(1, min(limit, METRICS_PAGE_MAX))
-
     all_metrics = get_cached_prometheus_metrics()
 
-    if filter:
-        metrics = [m for m in all_metrics if filter in m]
-    else:
-        metrics = all_metrics
-
-    # Pagination by offset encoded as pageToken
-    try:
-        start = int(pageToken) if pageToken is not None else 0
-    except ValueError:
-        start = 0
-    end = start + limit
-
-    page = metrics[start:end]
-    next_token = str(end) if end < len(metrics) else None
+    page_info = _filter_and_paginate(all_metrics, filter, limit, pageToken)
+    page = page_info["page"]
+    next_token = page_info["next_token"]
+    start = page_info["start"]
 
     if ctx:
         await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} metrics")
