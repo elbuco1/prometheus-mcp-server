@@ -794,7 +794,7 @@ async def create_grafana_dashboard(
     """Create a Grafana dashboard.
 
     Args:
-        username: Folder name to place the dashboard (created if missing).
+        username: Linux username. A Grafana folder with this name will be used/created.
         query: The query string (PromQL for Prometheus or Graphite target for Graphite).
         datasourceType: One of {"prometheus","graphite"} specifying the datasource to use.
         legend: Optional legend/series alias for the panel.
@@ -859,10 +859,18 @@ async def create_grafana_dashboard(
         result = make_grafana_request("/dashboards/db", method="POST", json_body=payload, timeout=60)
 
         # Grafana returns {status, uid, url, slug, id, version} etc.
+        uid = result.get("uid") or (result.get("data", {}) or {}).get("uid")
+        rel_url = result.get("url") or (result.get("data", {}) or {}).get("url")  # e.g. /d/uid/slug
+        web_base = GRAFANA_BASE_URL.rstrip('/')
+        if web_base.endswith('/api'):
+            web_base = web_base[:-4]
+        full_url = f"{web_base}{rel_url}" if isinstance(rel_url, str) and rel_url.startswith('/') else rel_url
+
         out = {
             "id": result.get("id"),
-            "uid": result.get("uid") or (result.get("data", {}) or {}).get("uid"),
-            "url": result.get("url") or (result.get("data", {}) or {}).get("url"),
+            "uid": uid,
+            "url": rel_url,
+            "dashboardUrl": full_url,
             "folderId": folder_id,
         }
         if ctx:
