@@ -1,43 +1,25 @@
 import asyncio
 from fastmcp import Client
 
+# Run server in http mode. Not needed if stdio mode is used:
+# uv venv
+# source .venv/bin/activate
+# uv pip install -e .
+# export METRICS_MCP_SERVER_TRANSPORT=http
+# python -m prometheus_mcp_server.main
+
 async def main():
-    # Connect to your HTTP server (FastMCP uses JSON-RPC over /mcp)
-    async with Client("http://localhost:8080/mcp") as client:
+    # Connect to HTTP server (FastMCP uses JSON-RPC over /mcp)
+    # async with Client("http://localhost:8080/mcp") as client: # <- if testing with http
+    async with Client("src/prometheus_mcp_server/server.py") as client:
         await client.ping()
         result = await client.call_tool("health_check", {})
         print(result)
         print("--------\n")
 
-        # Example: create/update Grafana dashboard panel (Graphite)
-        result = await client.call_tool("create_grafana_dashboard", {
-            "username": "user-demo",
-            "datasourceType": "graphite",
-            "query": "alias(summarize(transformNull(qstats.count.model_service.kubernetes.predict.send.by_model_id.3000214.all.count, 0), '1m', 'avg'), \"3000214\")",
-            "panelTitle": "Graphite: model 3000214 (1m avg)",
-            "legend": "3000214",
-            "refresh": "5s",
-            "tags": ["graphite", "predictions"]
-        })
+        result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
         print(result)
         print("--------\n")
-
-        # # Example: create/update Grafana dashboard panel (Prometheus)
-        # result = await client.call_tool("create_grafana_dashboard", {
-        #     "username": "user-demo",
-        #     "datasourceType": "prometheus",
-        #     "query": "sum by (model_id) (rate(oreo_mlserve_predictions_total[5m]))",
-        #     "panelTitle": "Predictions by Model (5m rate)",
-        #     "legend": "{{model_id}}",
-        #     "refresh": "5s",
-        #     "tags": ["api", "predictions"]
-        # })
-        # print(result)
-        # print("--------\n")
-
-        # result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
-        # print(result)
-        # print("--------\n")
 
         # result = await client.call_tool("list_prometheus_metrics", {
         #     "limit": 10,
@@ -88,6 +70,32 @@ async def main():
         #     })
         #     print(result2)
         #     print("--------\n")
+
+                # # Example: create/update Grafana dashboard panel (Graphite)
+        # result = await client.call_tool("create_grafana_dashboard", {
+        #     "username": "user-demo",
+        #     "datasourceType": "graphite",
+        #     "query": "alias(summarize(transformNull(qstats.count.model_service.kubernetes.predict.send.by_model_id.3000214.all.count, 0), '1m', 'avg'), \"3000214\")",
+        #     "panelTitle": "Graphite: model 3000214 (1m avg)",
+        #     "legend": "3000214",
+        #     "refresh": "5s",
+        #     "tags": ["graphite", "predictions"]
+        # })
+        # print(result)
+        # print("--------\n")
+
+        # # Example: create/update Grafana dashboard panel (Prometheus)
+        # result = await client.call_tool("create_grafana_dashboard", {
+        #     "username": "user-demo",
+        #     "datasourceType": "prometheus",
+        #     "query": "sum by (model_id) (rate(oreo_mlserve_predictions_total[5m]))",
+        #     "panelTitle": "Predictions by Model (5m rate)",
+        #     "legend": "{{model_id}}",
+        #     "refresh": "5s",
+        #     "tags": ["api", "predictions"]
+        # })
+        # print(result)
+        # print("--------\n")
 
 
 asyncio.run(main())
