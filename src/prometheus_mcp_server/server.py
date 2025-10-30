@@ -248,6 +248,31 @@ def make_prometheus_request(endpoint, params=None):
         logger.error("Unexpected error during Prometheus request", endpoint=endpoint, url=url, error=str(e), error_type=type(e).__name__)
         raise
 
+def make_graphite_request(path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30):
+    """Make a request to Graphite/VictoriaMetrics (via Grafana proxy) and return JSON.
+
+    Args:
+        path: URL path beginning with '/'; e.g., '/metrics/expand/' or '/render'.
+        params: Optional query parameters dict.
+        timeout: Request timeout in seconds.
+    """
+    base = config.graphite_url.rstrip('/')
+    url = f"{base}{path}"
+    try:
+        logger.debug("Making Graphite request", path=path, url=url, params=params)
+        resp = requests.get(url, params=params, timeout=timeout, verify=config.url_ssl_verify)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        logger.error("HTTP request to Graphite failed", path=path, url=url, error=str(e), error_type=type(e).__name__)
+        raise
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse Graphite response as JSON", path=path, url=url, error=str(e))
+        raise ValueError(f"Invalid JSON response from Graphite: {str(e)}")
+    except Exception as e:
+        logger.error("Unexpected error during Graphite request", path=path, url=url, error=str(e), error_type=type(e).__name__)
+        raise
+
 def get_cached_prometheus_metrics() -> List[str]:
     """Get metrics list with caching to improve completion performance.
 
@@ -277,11 +302,7 @@ def get_cached_graphite_metrics() -> List[str]:
     current_time = time.time()
 
     def _fetch_graphite_index() -> List[str]:
-        url = f"{config.graphite_url.rstrip('/')}/metrics/index.json"
-        logger.debug("Fetching Graphite metrics index", url=url)
-        resp = requests.get(url, timeout=30, verify=config.url_ssl_verify)
-        resp.raise_for_status()
-        data = resp.json()
+        data = make_graphite_request("/metrics/index.json", timeout=30)
         if not isinstance(data, list):
             raise ValueError(f"Unexpected Graphite index format: {type(data).__name__}")
         return data
@@ -547,8 +568,6 @@ async def query_graphite(
         if ctx:
             await ctx.report_progress(progress=0, total=100, message="Preparing Graphite query...")
 
-        graphite_base = config.graphite_url.rstrip("/")
-        url = f"{graphite_base}/render"
         params: Dict[str, Any] = {
             "format": "json",
             "from": from_,
@@ -560,10 +579,8 @@ async def query_graphite(
         # requests supports list values to create repeated query params
         params["target"] = targets
 
-        logger.info("Executing Graphite render", url=url, target_count=len(targets))
-        resp = requests.get(url, params=params, timeout=60, verify=config.url_ssl_verify)
-        resp.raise_for_status()
-        data = resp.json()
+        logger.info("Executing Graphite render", target_count=len(targets))
+        data = make_graphite_request("/render", params=params, timeout=60)
         if not isinstance(data, list):
             raise ValueError(f"Unexpected Graphite render response: {type(data).__name__}")
 
@@ -608,13 +625,8 @@ async def find_graphite_keys(pattern: str, ctx=None) -> Dict[str, Any]:
         if ctx:
             await ctx.report_progress(progress=0, total=100, message="Searching Graphite keys...")
 
-        base = config.graphite_url.rstrip('/')
-        url = f"{base}/metrics/expand/"
-        params = {"query": pattern}
-        logger.info("Finding Graphite keys (VM expand)", url=url, pattern=pattern)
-        resp = requests.get(url, params=params, timeout=30, verify=config.url_ssl_verify)
-        resp.raise_for_status()
-        data = resp.json()
+        logger.info("Finding Graphite keys (VM expand)", pattern=pattern)
+        data = make_graphite_request("/metrics/expand/", params={"query": pattern}, timeout=30)
 
         directories: List[str] = []
         metrics: List[str] = []
