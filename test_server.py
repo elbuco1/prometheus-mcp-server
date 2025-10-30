@@ -21,5 +21,18 @@ async def main():
         await client.ping()
         result = await client.call_tool("health_check", {})
         print(result)
+        print("--------\n")
+
+        # result = await client.call_tool("list_metrics", {})
+        # print(result)
+        # print("--------\n")
+
+        result = await client.call_tool("list_graphite_metrics", {
+            "pageToken": "250",
+            "limit": 5,
+        })
+        print(result)
+        print("--------\n")
+
 
 asyncio.run(main())

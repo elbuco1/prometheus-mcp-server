@@ -75,6 +75,12 @@ mcp = FastMCP("Metrics MCP")
 _metrics_cache = {"data": None, "timestamp": 0}
 _CACHE_TTL = 300  # 5 minutes
 
+# Cache for Graphite metrics index to avoid repeated large downloads
+_graphite_metrics_cache = {"data": None, "timestamp": 0}
+
+# Shared pagination cap for metrics listings (Prometheus/Graphite)
+METRICS_PAGE_MAX = 200
+
 # Get logger instance
 logger = get_logger()
 
@@ -147,8 +153,6 @@ async def health_check() -> Dict[str, Any]:
             health_status["graphite"]["error"] = str(e)
             health_status["status"] = "degraded"
             
-        
-        
         logger.info("Health check completed", status=health_status["status"])
         return health_status
         
@@ -215,6 +219,8 @@ def get_cached_metrics() -> List[str]:
     # Fetch fresh metrics
     try:
         data = make_prometheus_request("label/__name__/values")
+        # Ensure deterministic ordering for stable pagination
+        data = sorted(data)
         _metrics_cache["data"] = data
         _metrics_cache["timestamp"] = current_time
         logger.debug("Refreshed metrics cache", metric_count=len(data))
@@ -223,6 +229,38 @@ def get_cached_metrics() -> List[str]:
         logger.error("Failed to fetch metrics for cache", error=str(e))
         # Return cached data if available, even if expired
         return _metrics_cache["data"] if _metrics_cache["data"] is not None else []
+
+def get_cached_graphite_metrics() -> List[str]:
+    """Fetch Graphite metrics index.json with caching.
+
+    Returns the full list of metric paths (strings).
+    """
+    current_time = time.time()
+
+    if _graphite_metrics_cache["data"] is not None and (current_time - _graphite_metrics_cache["timestamp"]) < _CACHE_TTL:
+        logger.debug("Using cached Graphite metrics index", cache_age=current_time - _graphite_metrics_cache["timestamp"])
+        return _graphite_metrics_cache["data"]
+
+    try:
+        url = f"{config.graphite_url.rstrip('/')}/metrics/index.json"
+        logger.debug("Fetching Graphite metrics index", url=url)
+        resp = requests.get(url, timeout=30, verify=config.url_ssl_verify)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.error("Unexpected Graphite index format", type=type(data).__name__)
+            return _graphite_metrics_cache["data"] if _graphite_metrics_cache["data"] is not None else []
+
+        # Ensure deterministic ordering for stable pagination
+        data = sorted(data)
+
+        _graphite_metrics_cache["data"] = data
+        _graphite_metrics_cache["timestamp"] = current_time
+        logger.debug("Graphite metrics index cached", metric_count=len(data))
+        return data
+    except Exception as e:
+        logger.error("Failed to fetch Graphite metrics index", error=str(e))
+        return _graphite_metrics_cache["data"] if _graphite_metrics_cache["data"] is not None else []
 
 # Note: Argument completions will be added when FastMCP supports the completion
 # capability. The get_cached_metrics() function above is ready for that integration.
@@ -265,6 +303,77 @@ async def execute_query(query: str, time: Optional[str] = None) -> Dict[str, Any
                 result_count=len(data["result"]) if isinstance(data["result"], list) else 1)
 
     return result
+
+@mcp.tool(
+    description="List all available metrics in Graphite (via Grafana proxy) with optional filtering and pagination",
+    annotations={
+        "title": "List Graphite Metrics",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True
+    }
+)
+async def list_graphite_metrics(filter: Optional[str] = None, limit: int = 200, pageToken: Optional[str] = None, ctx=None) -> Dict[str, Any]:
+    """List Graphite metrics via Grafana's datasource proxy with client-side filtering and stable pagination.
+
+    Behavior:
+        - Downloads Graphite's full metric index from `{graphite_url}/metrics/index.json` (through Grafana proxy) and caches it for 5 minutes.
+        - Metrics are sorted alphabetically before caching to guarantee stable, deterministic pagination across calls.
+        - Optional substring `filter` is applied client-side to the cached list (case-sensitive containment).
+        - Pagination uses a zero-based offset encoded as a string `pageToken` and a `limit` cap.
+
+    Args:
+        filter: Optional substring to match metric paths (e.g., "cpu."), case-sensitive.
+        limit: Max metrics to return in this page (default 200; clamped to 1..METRICS_PAGE_MAX).
+        pageToken: Opaque cursor representing the current offset (stringified int). Omit or "0" for the first page.
+
+    Returns:
+        Dict with shape:
+            {
+                "source": "graphite",
+                "metrics": [str, ...],           # alphabetically sorted page of metric paths
+                "nextPageToken": str | None      # pass to next call; None when no more results
+            }
+
+    Notes for LLMs:
+        - For large listings, iterate using `nextPageToken` until it returns null.
+        - Use `filter` to narrow results and reduce token/latency costs.
+        - Page sizes above METRICS_PAGE_MAX are automatically reduced to METRICS_PAGE_MAX.
+    """
+    # Normalize arguments
+    limit = max(1, min(limit, METRICS_PAGE_MAX))
+
+    try:
+        if ctx:
+            await ctx.report_progress(progress=0, total=100, message="Loading Graphite metrics index...")
+
+        all_metrics = get_cached_graphite_metrics()
+
+        if filter:
+            metrics = [m for m in all_metrics if filter in m]
+        else:
+            metrics = all_metrics
+
+        # Pagination by offset encoded as pageToken
+        try:
+            start = int(pageToken) if pageToken is not None else 0
+        except ValueError:
+            start = 0
+        end = start + limit
+
+        page = metrics[start:end]
+        next_token = str(end) if end < len(metrics) else None
+
+        if ctx:
+            await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} metrics")
+
+        logger.info("Graphite metrics listed", filter=filter, page_start=start, page_size=len(page), next_token_present=bool(next_token))
+        return {"source": "graphite", "metrics": page, "nextPageToken": next_token}
+
+    except Exception as e:
+        logger.error("Failed to list Graphite metrics", error=str(e))
+        return {"source": "graphite", "metrics": [], "nextPageToken": None, "error": str(e)}
 
 @mcp.tool(
     description="Execute a PromQL range query with start time, end time, and step interval",
@@ -334,10 +443,15 @@ async def execute_range_query(query: str, start: str, end: str, step: str, ctx=N
     }
 )
 async def list_metrics(ctx=None) -> List[str]:
-    """Retrieve a list of all metric names available in Prometheus.
+    """List Prometheus metric names (via Grafana proxy) with cached, alphabetic ordering.
+
+    Behavior:
+        - Reads Prometheus label names from `/api/v1/label/__name__/values` through the Grafana datasource proxy.
+        - Caches the full list for 5 minutes to minimize repeated network calls.
+        - The cached list is sorted alphabetically for deterministic ordering.
 
     Returns:
-        List of metric names as strings
+        List[str]: Alphabetically sorted metric names.
     """
     logger.info("Listing available metrics")
 
@@ -345,7 +459,7 @@ async def list_metrics(ctx=None) -> List[str]:
     if ctx:
         await ctx.report_progress(progress=0, total=100, message="Fetching metrics list...")
 
-    data = make_prometheus_request("label/__name__/values")
+    data = get_cached_metrics()
 
     if ctx:
         await ctx.report_progress(progress=100, total=100, message=f"Retrieved {len(data)} metrics")
