@@ -602,8 +602,8 @@ async def query_graphite(
         "openWorldHint": True
     }
 )
-async def find_graphite_keys(pattern: str, ctx=None) -> Dict[str, Any]:
-    """Find Graphite directories and leaf metrics for a glob `pattern`.
+async def find_graphite_keys(pattern: str, limit: int = 200, pageToken: Optional[str] = None, ctx=None) -> Dict[str, Any]:
+    """Find Graphite directories and leaf metrics for a glob `pattern`, with pagination.
 
     Behavior:
         - Calls `{graphite_url}/metrics/find?format=json&query={pattern}` through Grafana's datasource proxy.
@@ -612,13 +612,16 @@ async def find_graphite_keys(pattern: str, ctx=None) -> Dict[str, Any]:
 
     Args:
         pattern: Graphite/Carbon-style glob pattern (single-segment wildcards).
+        limit: Max number of items (directories + metrics) to return in this page (default 200; clamped to 1..METRICS_PAGE_MAX).
+        pageToken: Opaque cursor representing the current offset (stringified int). Omit or "0" for the first page.
 
     Returns:
         {
             "source": "graphite",
             "pattern": str,
-            "directories": [str, ...],
-            "metrics": [str, ...]
+            "directories": [str, ...],  # page slice only
+            "metrics": [str, ...],      # page slice only
+            "nextPageToken": str | None
         }
     """
     try:
@@ -643,10 +646,31 @@ async def find_graphite_keys(pattern: str, ctx=None) -> Dict[str, Any]:
         directories = sorted(directories)
         metrics = sorted(metrics)
 
-        if ctx:
-            await ctx.report_progress(progress=100, total=100, message=f"Found {len(metrics)} metrics and {len(directories)} dirs")
+        # Merge for pagination (prefix to retain type through pagination)
+        merged: List[str] = [f"D:{d}" for d in directories] + [f"M:{m}" for m in metrics]
+        page_info = _filter_and_paginate(merged, None, limit, pageToken)
+        page = page_info["page"]
+        next_token = page_info["next_token"]
 
-        return {"source": "graphite", "pattern": pattern, "directories": directories, "metrics": metrics}
+        # Demux page back into directories and metrics
+        page_directories: List[str] = []
+        page_metrics: List[str] = []
+        for item in page:
+            if item.startswith("D:"):
+                page_directories.append(item[2:])
+            elif item.startswith("M:"):
+                page_metrics.append(item[2:])
+
+        if ctx:
+            await ctx.report_progress(progress=100, total=100, message=f"Returned {len(page)} items")
+
+        return {
+            "source": "graphite",
+            "pattern": pattern,
+            "directories": page_directories,
+            "metrics": page_metrics,
+            "nextPageToken": next_token,
+        }
     except Exception as e:
         logger.error("Graphite find_keys failed", error=str(e))
         return {"source": "graphite", "pattern": pattern, "directories": [], "metrics": [], "error": str(e)}
