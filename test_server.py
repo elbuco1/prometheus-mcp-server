@@ -1,17 +1,3 @@
-import asyncio, json
-from fastmcp import Client
-from prometheus_mcp_server.server import mcp
-
-# async def main():
-#     async with Client(mcp) as client:
-#         res = await client.call_tool("list_metrics", {})
-#         print(f"Total metrics: {len(res.data)}")
-#         for metric in res.data:
-#             if "oreo" in metric or "mlserve" in metric:
-#                 print(metric)
-# asyncio.run(main())
-
-
 import asyncio
 from fastmcp import Client
 
@@ -22,6 +8,32 @@ async def main():
         result = await client.call_tool("health_check", {})
         print(result)
         print("--------\n")
+
+        # Example: create/update Grafana dashboard panel (Graphite)
+        result = await client.call_tool("create_grafana_dashboard", {
+            "username": "user-demo",
+            "datasourceType": "graphite",
+            "query": "alias(summarize(transformNull(qstats.count.model_service.kubernetes.predict.send.by_model_id.3000214.all.count, 0), '1m', 'avg'), \"3000214\")",
+            "panelTitle": "Graphite: model 3000214 (1m avg)",
+            "legend": "3000214",
+            "refresh": "5s",
+            "tags": ["graphite", "predictions"]
+        })
+        print(result)
+        print("--------\n")
+
+        # # Example: create/update Grafana dashboard panel (Prometheus)
+        # result = await client.call_tool("create_grafana_dashboard", {
+        #     "username": "user-demo",
+        #     "datasourceType": "prometheus",
+        #     "query": "sum by (model_id) (rate(oreo_mlserve_predictions_total[5m]))",
+        #     "panelTitle": "Predictions by Model (5m rate)",
+        #     "legend": "{{model_id}}",
+        #     "refresh": "5s",
+        #     "tags": ["api", "predictions"]
+        # })
+        # print(result)
+        # print("--------\n")
 
         # result = await client.call_tool("list_prometheus_metrics", {"limit": 10})
         # print(result)
@@ -34,11 +46,11 @@ async def main():
         # print(result)
         # print("--------\n")
 
-        result = await client.call_tool("list_graphite_metrics", {
-            "limit": 10,
-        })
-        print(result)
-        print("--------\n")
+        # result = await client.call_tool("list_graphite_metrics", {
+        #     "limit": 10,
+        # })
+        # print(result)
+        # print("--------\n")
 
         # result = await client.call_tool("list_graphite_metrics", {
         #     "pageToken": "10",
@@ -59,12 +71,12 @@ async def main():
         # print("--------\n")
 
         # Example Graphite key search (glob pattern) with pagination
-        result = await client.call_tool("find_graphite_keys", {
-            "pattern": "qstats.count.model_service.kubernetes.predict.send.by_model_id.*",
-            "limit": 5
-        })
-        print(result)
-        print("--------\n")
+        # result = await client.call_tool("find_graphite_keys", {
+        #     "pattern": "qstats.count.model_service.kubernetes.predict.send.by_model_id.*",
+        #     "limit": 5
+        # })
+        # print(result)
+        # print("--------\n")
 
         # # Next page using nextPageToken
         # if result and hasattr(result, "data") and isinstance(result.data, dict) and result.data.get("nextPageToken"):

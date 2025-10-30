@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timedelta
 from enum import Enum
 
-import dotenv
+import random
 import requests
 from fastmcp import FastMCP
 from prometheus_mcp_server.logging_config import get_logger
@@ -80,6 +80,28 @@ _graphite_metrics_cache = {"data": None, "timestamp": 0}
 
 # Shared pagination cap for metrics listings (Prometheus/Graphite)
 METRICS_PAGE_MAX = 200
+
+# Hardcoded Grafana datasource definitions for clarity and stability
+GRAFANA_DATASOURCES: Dict[str, Dict[str, Any]] = {
+    # Prometheus (VictoriaMetrics)
+    "prometheus": {
+        "id": DataSources.PROMETHEUS.value,
+        "uid": "000000014",
+        "orgId": 1,
+        "name": "victoriametrics",
+        "type": "prometheus",
+        "typeName": "Prometheus",
+    },
+    # Graphite (VictoriaMetrics frontend)
+    "graphite": {
+        "id": DataSources.GRAPHITE.value,
+        "uid": "zJCvgJ57k",
+        "orgId": 1,
+        "name": "Graphite-VictoriaMetrics",
+        "type": "graphite",
+        "typeName": "Graphite",
+    },
+}
 
 def _get_cached_list(cache_store: Dict[str, Any], fetch_fn, cache_name: str) -> List[str]:
     """Generic cache wrapper for list endpoints with TTL and deterministic sorting.
@@ -272,6 +294,78 @@ def make_graphite_request(path: str, params: Optional[Dict[str, Any]] = None, ti
     except Exception as e:
         logger.error("Unexpected error during Graphite request", path=path, url=url, error=str(e), error_type=type(e).__name__)
         raise
+
+def make_grafana_request(path: str, method: str = "GET", params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None, timeout: int = 30):
+    """Generic Grafana API request helper (JSON).
+
+    Args:
+        path: API path starting with '/api' or '/'. If it doesn't start with '/api', it will be joined to GRAFANA_BASE_URL.
+        method: HTTP method.
+        params: Query params.
+        json_body: JSON body for POST/PUT.
+        timeout: seconds.
+    """
+    base = GRAFANA_BASE_URL.rstrip('/')
+    url = base + path if path.startswith('/') else base + '/' + path
+    headers = {"Content-Type": "application/json"}
+    try:
+        logger.debug("Grafana API request", method=method, url=url, params=params)
+        resp = requests.request(method, url, params=params, json=json_body, timeout=timeout, headers=headers, verify=config.url_ssl_verify)
+        resp.raise_for_status()
+        if resp.content:
+            return resp.json()
+        return {}
+    except requests.exceptions.RequestException as e:
+        logger.error("Grafana API request failed", method=method, url=url, error=str(e))
+        raise
+
+def _grafana_find_or_create_folder(title: str) -> int:
+    # Search folders by title
+    try:
+        items = make_grafana_request("/search", params={"type": "dash-folder", "query": title})
+        if isinstance(items, list):
+            for item in items:
+                if item.get("title") == title and item.get("type") == "dash-folder":
+                    folder_id = item.get("id")
+                    if isinstance(folder_id, int):
+                        return folder_id
+    except Exception:
+        pass
+    # Create if not found
+    folder = make_grafana_request("/folders", method="POST", json_body={"title": title})
+    folder_id = folder.get("id")
+    if not isinstance(folder_id, int):
+        raise ValueError("Failed to resolve or create Grafana folder id")
+    return folder_id
+
+def _grafana_find_dashboard_in_folder(title: str, folder_id: int) -> Optional[Dict[str, Any]]:
+    # Restrict search to the folder via folderIds
+    items = make_grafana_request(
+        "/search",
+        params={"type": "dash-db", "query": title, "folderIds": str(folder_id)},
+    )
+    if isinstance(items, list):
+        for item in items:
+            if item.get("title") == title and item.get("type") == "dash-db":
+                return item
+    return None
+
+def _grafana_get_dashboard_by_uid(uid: str) -> Dict[str, Any]:
+    return make_grafana_request(f"/dashboards/uid/{uid}")
+
+def _build_timeseries_panel(title: str, datasource: Dict[str, Any], targets: List[Dict[str, Any]], grid_pos: Dict[str, int]) -> Dict[str, Any]:
+    # Use datasource name string to match expected schema (see dashboard.json example)
+    ds_ref = datasource.get("name")
+    panel: Dict[str, Any] = {
+        "id": random.randint(1, 1_000_000),
+        "type": "timeseries",
+        "title": title,
+        "datasource": ds_ref,
+        "targets": targets,
+        "fieldConfig": {"defaults": {}, "overrides": []},
+        "gridPos": grid_pos,
+    }
+    return panel
 
 def get_cached_prometheus_metrics() -> List[str]:
     """Get metrics list with caching to improve completion performance.
@@ -675,6 +769,109 @@ async def find_graphite_keys(pattern: str, limit: int = 200, pageToken: Optional
     except Exception as e:
         logger.error("Graphite find_keys failed", error=str(e))
         return {"source": "graphite", "pattern": pattern, "directories": [], "metrics": [], "error": str(e)}
+
+
+@mcp.tool(
+    description="Create a Grafana dashboard with given title/panels in a user folder (creates folder if missing)",
+    annotations={
+        "title": "Create Grafana Dashboard",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True
+    }
+)
+async def create_grafana_dashboard(
+    username: str,
+    query: str,
+    datasourceType: str,  # "prometheus" | "graphite"
+    legend: Optional[str] = None,
+    panelTitle: Optional[str] = None,
+    refresh: str = "5s",
+    tags: Optional[List[str]] = None,
+    ctx=None,
+) -> Dict[str, Any]:
+    """Create a Grafana dashboard.
+
+    Args:
+        username: Folder name to place the dashboard (created if missing).
+        query: The query string (PromQL for Prometheus or Graphite target for Graphite).
+        datasourceType: One of {"prometheus","graphite"} specifying the datasource to use.
+        legend: Optional legend/series alias for the panel.
+        panelTitle: Optional panel title; defaults to the query string if not provided.
+        refresh: Dashboard auto-refresh (e.g., '5s').
+        tags: Optional dashboard tags.
+
+    Returns: {"id": int, "uid": str, "url": str, "folderId": int}
+    """
+    try:
+        if ctx:
+            await ctx.report_progress(progress=0, total=100, message="Resolving folder and datasource...")
+
+        folder_id = _grafana_find_or_create_folder(username)
+        ds_key = datasourceType.lower()
+        if ds_key not in ("prometheus", "graphite"):
+            return {"error": "Invalid datasourceType. Use 'prometheus' or 'graphite'"}
+        ds = GRAFANA_DATASOURCES.get(ds_key)
+
+        # Build a single panel from the provided query
+        panel_title = panelTitle or query or ("Prometheus Query" if ds_key == "prometheus" else "Graphite Target")
+        if ds_key == "prometheus":
+            targets = [{"refId": "A", "expr": query, "legendFormat": legend}]
+        else:
+            targets = [{"refId": "A", "target": query, "legendFormat": legend}]
+        panels = [_build_timeseries_panel(panel_title, ds, targets, {"h": 10, "w": 24, "x": 0, "y": 0})]
+
+        # Find or create the target dashboard 'metrics-mcp' in the user's folder
+        dash_title = "metrics-mcp"
+        existing = _grafana_find_dashboard_in_folder(dash_title, folder_id)
+        if existing and existing.get("uid"):
+            # Fetch current dashboard JSON
+            full = _grafana_get_dashboard_by_uid(existing["uid"])
+            current_dash = full.get("dashboard", {})
+            current_panels = current_dash.get("panels", []) or []
+            current_panels.extend(panels)
+            current_dash["panels"] = current_panels
+            current_dash["title"] = dash_title
+            if tags is not None:
+                current_dash["tags"] = tags
+            # Maintain/override refresh only if provided
+            if refresh:
+                current_dash["refresh"] = refresh
+            # Bump version to avoid conflict
+            current_dash["version"] = int(current_dash.get("version") or 0) + 1
+            dashboard = current_dash
+        else:
+            dashboard = {
+                "title": dash_title,
+                "tags": tags or [],
+                "timezone": "browser",
+                "schemaVersion": 39,
+                "version": 0,
+                "refresh": refresh,
+                "panels": panels,
+            }
+
+        if ctx:
+            await ctx.report_progress(progress=50, total=100, message="Creating Grafana dashboard...")
+
+        payload = {"dashboard": dashboard, "folderId": folder_id, "overwrite": True}
+        result = make_grafana_request("/dashboards/db", method="POST", json_body=payload, timeout=60)
+
+        # Grafana returns {status, uid, url, slug, id, version} etc.
+        out = {
+            "id": result.get("id"),
+            "uid": result.get("uid") or (result.get("data", {}) or {}).get("uid"),
+            "url": result.get("url") or (result.get("data", {}) or {}).get("url"),
+            "folderId": folder_id,
+        }
+        if ctx:
+            await ctx.report_progress(progress=100, total=100, message="Dashboard created")
+        logger.info("Grafana dashboard created", id=out.get("id"), uid=out.get("uid"), url=out.get("url"))
+        return out
+    except Exception as e:
+        logger.error("Failed to create Grafana dashboard", error=str(e))
+        return {"error": str(e)}
 
 @mcp.tool(
     description="Get metadata for a specific Prometheus metric",
