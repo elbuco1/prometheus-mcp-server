@@ -80,7 +80,7 @@ logger = get_logger()
 
 # Health check tool for Docker containers and monitoring
 @mcp.tool(
-    description="Health check endpoint for container monitoring and status verification",
+    description="Health check endpoint for container monitoring and status verification of underlying Grafana, Prometheus, and Graphite services",
     annotations={
         "title": "Health Check",
         "readOnlyHint": True,
@@ -103,19 +103,26 @@ async def health_check() -> Dict[str, Any]:
             "transport": config.mcp_server_config.mcp_server_transport if config.mcp_server_config else "stdio",
             "prometheus": {
                 "status": "unknown",
-                "error": None,
             },
             "graphite": {
                 "status": "unknown",
-                "error": None,
             },
             "grafana": {
                 "status": "unknown",
-                "error": None,
             },
         }
         
-        # Test Prometheus connectivity
+        # Test Grafana API health
+        try:
+            resp = requests.get(f"{GRAFANA_BASE_URL}/health", timeout=10)
+            resp.raise_for_status()
+            health_status["grafana"]["status"] = "healthy"
+        except Exception as e:
+            health_status["grafana"]["status"] = "unhealthy"
+            health_status["grafana"]["error"] = str(e)
+            health_status["status"] = "degraded"
+
+        # Test Prometheus connectivity (through Grafana datasource proxy)
         try:
             # Quick connectivity test
             make_prometheus_request("query", params={"query": "up", "time": str(int(time.time()))})
@@ -125,8 +132,22 @@ async def health_check() -> Dict[str, Any]:
             health_status["prometheus"]["error"] = str(e)
             health_status["status"] = "degraded"
 
-        # TODO: Test Graphite connectivity
-        # TODO: Test Grafana dashboard connectivity
+        # Test Graphite connectivity (through Grafana datasource proxy)
+        try:
+            graphite_base = config.graphite_url.rstrip("/")
+            resp = requests.get(
+                f"{graphite_base}/metrics/find",
+                params={"query": "*"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            health_status["graphite"]["status"] = "healthy"
+        except Exception as e:
+            health_status["graphite"]["status"] = "unhealthy"
+            health_status["graphite"]["error"] = str(e)
+            health_status["status"] = "degraded"
+            
+        
         
         logger.info("Health check completed", status=health_status["status"])
         return health_status
